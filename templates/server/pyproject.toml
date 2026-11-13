@@ -1,0 +1,32 @@
+[project]
+name = "__name__-mcp"
+version = "0.1.0"
+description = "MCP server for __name__"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.13"
+dependencies = [
+    "mcp>=2.3,<3",
+    "starlette>=0.48",
+    "uvicorn>=0.31",
+]
+
+[project.scripts]
+__name__-mcp = "__name___mcp.server:main"
+
+[build-system]
+requires = ["uv_build>=0.8,<0.14"]
+build-backend = "uv_build"
+
+[tool.ruff]
+extend = "../../ruff.toml"
+
+[tool.mypy]
+strict = true
+python_version = "3.13"
+mypy_path = "src"
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

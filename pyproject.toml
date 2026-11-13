@@ -1,0 +1,17 @@
+[project]
+name = "mcp-suite"
+version = "0.1.0"
+requires-python = ">=3.13"
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["servers/*"]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.18",
+    "pytest>=8.4",
+    "ruff>=0.13",
+]

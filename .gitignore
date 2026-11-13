@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+.env
+*.env
+!.env.example
+drafts.json
+sessions/
+media/

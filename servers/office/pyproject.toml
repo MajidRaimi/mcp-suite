@@ -1,0 +1,42 @@
+[project]
+name = "office-mcp"
+version = "0.1.0"
+description = "MCP server that reads the signed-in Outlook and Teams apps on a Mac through the accessibility API"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.13"
+dependencies = [
+    "mcp>=2.3,<3",
+    "starlette>=0.46",
+    "uvicorn>=0.34",
+    "cryptography>=46,<49; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "pyobjc-framework-ApplicationServices>=11; sys_platform == 'darwin'",
+    "pyobjc-framework-Cocoa>=11; sys_platform == 'darwin'",
+]
+
+[project.scripts]
+office-mcp = "office_mcp.server:main"
+office = "office_mcp.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.4", "mypy>=1.18", "ruff>=0.13", "httpx>=0.28"]
+
+[build-system]
+requires = ["uv_build>=0.8,<0.14"]
+build-backend = "uv_build"
+
+[tool.ruff]
+extend = "../../ruff.toml"
+
+[tool.ruff.lint]
+extend-ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.mypy]
+strict = true
+python_version = "3.13"
+mypy_path = ["$MYPY_CONFIG_FILE_DIR/src", "$MYPY_CONFIG_FILE_DIR/tests"]
+explicit_package_bases = true
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "tests"]
+testpaths = ["tests"]

@@ -1,0 +1,14 @@
+[Unit]
+Description=SSH tunnel to office-mcp running on a Mac
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/office-mcp/tunnel.env
+ExecStart=%h/mcp-suite/servers/office/examples/ssh-tunnel.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,19 @@
+services:
+  waha:
+    image: devlikeapro/waha:gows-2026.9.2
+    container_name: waha
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3500:3000"
+    env_file: .env
+    environment:
+      WHATSAPP_DEFAULT_ENGINE: GOWS
+      WHATSAPP_RESTART_ALL_SESSIONS: "True"
+      WAHA_PRINT_QR: "False"
+      WAHA_LOG_LEVEL: info
+      WAHA_MEDIA_STORAGE: LOCAL
+      WHATSAPP_DOWNLOAD_MEDIA: "False"
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ./sessions:/app/.sessions
+      - ./media:/app/.media

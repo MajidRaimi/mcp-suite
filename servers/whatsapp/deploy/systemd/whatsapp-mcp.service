@@ -1,0 +1,14 @@
+[Unit]
+Description=WhatsApp MCP server (WAHA)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/whatsapp-mcp/env
+ExecStart=%h/.local/bin/whatsapp-mcp
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

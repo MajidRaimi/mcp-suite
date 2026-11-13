@@ -1,0 +1,47 @@
+[project]
+name = "whatsapp-mcp"
+version = "0.1.0"
+description = "MCP server for reading WhatsApp and sending confirmed replies through a self-hosted WAHA"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.13"
+dependencies = [
+    "anyio>=4.9",
+    "httpx>=0.28",
+    "mcp>=2.3,<3",
+    "pydantic>=2.11",
+    "starlette>=1.0",
+    "uvicorn>=0.35",
+]
+
+[project.scripts]
+whatsapp-mcp = "whatsapp_mcp.server:main"
+
+[project.urls]
+Repository = "https://github.com/MajidRaimi/mcp-suite"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.18",
+    "pytest>=8.4",
+    "ruff>=0.13",
+]
+
+[build-system]
+requires = ["uv_build>=0.8,<0.14"]
+build-backend = "uv_build"
+
+[tool.ruff]
+extend = "../../ruff.toml"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
+
+[tool.mypy]
+strict = true
+python_version = "3.13"
+mypy_path = ["$MYPY_CONFIG_FILE_DIR/src", "$MYPY_CONFIG_FILE_DIR/tests"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "tests"]
+testpaths = ["tests"]

@@ -1,0 +1,138 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.13.1"
+  GITLEAKS_VERSION: "8.30.1"
+
+jobs:
+  discover:
+    name: Discover servers
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.servers.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Build server matrix
+        id: servers
+        run: |
+          matrix=$(
+            for dir in servers/*/; do
+              [ -d "$dir" ] || continue
+              name=$(basename "$dir")
+              config="${dir}ci.json"
+              if [ -f "$config" ]; then
+                runners=$(jq -c '.runners // ["ubuntu-latest"]' "$config")
+              else
+                runners='["ubuntu-latest"]'
+              fi
+              jq -cn --arg server "$name" --argjson runners "$runners" \
+                '$runners | map({server: $server, runner: .})'
+            done | jq -cs '{include: (add // [])}'
+          )
+          echo "$matrix" | jq .
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  check:
+    name: ${{ matrix.server }} on ${{ matrix.runner }}
+    needs: discover
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    defaults:
+      run:
+        working-directory: servers/${{ matrix.server }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - name: Install workspace
+        run: uv sync --locked --all-packages
+      - name: Ruff lint
+        run: uv run --no-sync ruff check .
+      - name: Ruff format
+        run: uv run --no-sync ruff format --check .
+      - name: Mypy
+        run: uv run --no-sync mypy src tests
+      - name: Pytest
+        run: uv run --no-sync pytest
+
+  template:
+    name: Server template
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - name: Scaffold a throwaway server
+        run: uv run --no-project python templates/scaffold.py templatecheck --port 8799
+      - name: Install workspace
+        run: uv sync --all-packages
+      - name: Check scaffolded server
+        working-directory: servers/templatecheck
+        run: |
+          uv run --no-sync ruff check .
+          uv run --no-sync ruff format --check .
+          uv run --no-sync mypy src tests
+          uv run --no-sync pytest
+
+  hygiene:
+    name: Repository hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - name: Lockfile is current
+        run: uv lock --check
+      - name: Install gitleaks
+        working-directory: ${{ runner.temp }}
+        run: |
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfLO "${base}/${archive}"
+          curl -sSfLO "${base}/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          sha256sum --check --ignore-missing "gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          tar -xzf "$archive" gitleaks
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Scan history for secrets
+        run: gitleaks git --redact --verbose .
+      - name: Reject em dashes
+        run: |
+          if git grep -nI "$(printf '\342\200\224')"; then
+            echo "::error::Replace em dashes with periods, commas, parentheses or colons"
+            exit 1
+          fi
+      - name: Every server ships its required files
+        run: |
+          status=0
+          for dir in servers/*/; do
+            for required in README.md .env.example pyproject.toml tests; do
+              if [ ! -e "${dir}${required}" ]; then
+                echo "::error file=${dir}${required}::missing ${required} in ${dir}"
+                status=1
+              fi
+            done
+          done
+          exit "$status"
