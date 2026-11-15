@@ -1,27 +1,33 @@
 from __future__ import annotations
 
-import subprocess
-import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
+from enum import StrEnum
 from importlib import import_module
-from typing import Any
+from typing import Any, Protocol
 
-from office_mcp.shared.errors import OfficeError
-from office_mcp.shared.node import Node
-
-ATTRIBUTES = (
-    "AXRole",
-    "AXTitle",
-    "AXValue",
-    "AXDescription",
-    "AXDOMIdentifier",
-    "AXIdentifier",
-    "AXDOMClassList",
-    "AXChildren",
+from office_mcp.shared.errors import (
+    AccessibilityError,
+    AccessibilityModeError,
+    AppNotRunningError,
+    AxActionError,
+    UiTimeoutError,
 )
+from office_mcp.shared.node import Node
+from office_mcp.shared.waiting import Waiter
+
 MAX_DEPTH = 90
 MAX_NODES = 40000
-POLL_SECONDS = 0.5
+LAUNCH_TIMEOUT = 15.0
+AX_SUCCESS = 0
+AX_CANNOT_COMPLETE = -25204
+AX_ACTION_UNSUPPORTED = -25205
+AX_FAILURE = -25200
+AX_NOT_IMPLEMENTED = -25208
+MENU_OPEN_CODES = frozenset({AX_FAILURE, AX_CANNOT_COMPLETE, AX_ACTION_UNSUPPORTED})
+ENHANCED_CODES = frozenset({AX_NOT_IMPLEMENTED})
+CUSTOM_ACTION_NAME = "Name:"
+MANUAL_ACCESSIBILITY = "AXManualAccessibility"
+ENHANCED_INTERFACE = "AXEnhancedUserInterface"
 PERMISSION_HINT = (
     "Accessibility permission is missing for this process. In System Settings > Privacy & "
     "Security > Accessibility, allow the app that starts the server: your terminal (Terminal or "
@@ -30,148 +36,226 @@ PERMISSION_HINT = (
 )
 
 
+class AxBackend(Protocol):
+    def is_trusted(self) -> bool: ...
+
+    def application(self, pid: int) -> object: ...
+
+    def copy(self, element: object, name: str) -> tuple[int, object]: ...
+
+    def copy_many(
+        self, element: object, names: Sequence[str]
+    ) -> tuple[int, Sequence[object] | None]: ...
+
+    def set(self, element: object, name: str, value: object) -> int: ...
+
+    def perform(self, element: object, action: str) -> int: ...
+
+    def action_names(self, element: object) -> tuple[str, ...]: ...
+
+    def same(self, first: object, second: object) -> bool: ...
+
+    def range_value(self, location: int, length: int) -> object: ...
+
+
+class ProcessDirectory(Protocol):
+    def pid(self, bundle_id: str) -> int | None: ...
+
+    def launch(self, app_name: str) -> None: ...
+
+
+class AccessMode(StrEnum):
+    NATIVE = "native"
+    WEB = "web"
+    WEB_ENHANCED = "web_enhanced"
+
+
+class PyObjCBackend:
+    def __init__(self) -> None:
+        self._ax: Any = import_module("ApplicationServices")
+        self._core: Any = import_module("CoreFoundation")
+
+    def is_trusted(self) -> bool:
+        return bool(self._ax.AXIsProcessTrusted())
+
+    def application(self, pid: int) -> object:
+        return self._ax.AXUIElementCreateApplication(pid)
+
+    def copy(self, element: object, name: str) -> tuple[int, object]:
+        error, value = self._ax.AXUIElementCopyAttributeValue(element, name, None)
+        return int(error), value
+
+    def copy_many(
+        self, element: object, names: Sequence[str]
+    ) -> tuple[int, Sequence[object] | None]:
+        error, values = self._ax.AXUIElementCopyMultipleAttributeValues(
+            element, list(names), 0, None
+        )
+        return int(error), None if values is None else list(values)
+
+    def set(self, element: object, name: str, value: object) -> int:
+        return int(self._ax.AXUIElementSetAttributeValue(element, name, value))
+
+    def perform(self, element: object, action: str) -> int:
+        return int(self._ax.AXUIElementPerformAction(element, action))
+
+    def action_names(self, element: object) -> tuple[str, ...]:
+        error, names = self._ax.AXUIElementCopyActionNames(element, None)
+        if error != AX_SUCCESS or names is None:
+            return ()
+        return tuple(str(name) for name in names)
+
+    def same(self, first: object, second: object) -> bool:
+        return bool(self._core.CFEqual(first, second))
+
+    def range_value(self, location: int, length: int) -> object:
+        return self._ax.AXValueCreate(self._ax.kAXValueCFRangeType, (location, length))
+
+
 class AxApp:
     def __init__(
         self,
+        backend: AxBackend,
+        processes: ProcessDirectory,
         bundle_id: str,
         app_name: str,
-        launch_timeout: float = 15.0,
-        sleep: Callable[[float], None] = time.sleep,
-        clock: Callable[[], float] = time.monotonic,
+        waiter: Waiter,
+        mode: AccessMode = AccessMode.NATIVE,
     ) -> None:
-        self.ax: Any = import_module("ApplicationServices")
-        self._appkit: Any = import_module("AppKit")
-        self._bundle_id = bundle_id
-        self._app_name = app_name
-        self._launch_timeout = launch_timeout
-        self.sleep = sleep
-        self.clock = clock
+        self.backend = backend
+        self.processes = processes
+        self.bundle_id = bundle_id
+        self.app_name = app_name
+        self.waiter = waiter
+        self.mode = mode
+        self._prepared_pid: int | None = None
 
     def trusted(self) -> bool:
-        return bool(self.ax.AXIsProcessTrusted())
+        return self.backend.is_trusted()
+
+    def require_trust(self) -> None:
+        if not self.trusted():
+            raise AccessibilityError(PERMISSION_HINT)
+
+    def pid(self) -> int | None:
+        return self.processes.pid(self.bundle_id)
+
+    def require_pid(self) -> int:
+        pid = self.pid()
+        if pid is None:
+            raise AppNotRunningError(
+                f"{self.app_name} is not running on this Mac. Open it and sign in."
+            )
+        return pid
 
     def running(self) -> bool:
         return self.pid() is not None
 
-    def require_trust(self) -> None:
-        if not self.trusted():
-            raise OfficeError(PERMISSION_HINT)
+    def application(self) -> object:
+        pid = self.require_pid()
+        element = self.backend.application(pid)
+        if self.mode is not AccessMode.NATIVE and self._prepared_pid != pid:
+            self.backend.set(element, MANUAL_ACCESSIBILITY, True)
+            self._prepared_pid = pid
+        return element
 
-    def pid(self) -> int | None:
-        workspace = self._appkit.NSWorkspace.sharedWorkspace()
-        for app in workspace.runningApplications():
-            if app.bundleIdentifier() == self._bundle_id:
-                return int(app.processIdentifier())
-        return None
+    def windows(self) -> list[object]:
+        return list(as_sequence(self.attribute(self.application(), "AXWindows")))
 
-    def application(self, web_content: bool = False) -> Any:
-        pid = self.pid()
-        if pid is None:
-            raise OfficeError(f"{self._app_name} is not running on this Mac. Open it and sign in.")
-        application = self.ax.AXUIElementCreateApplication(pid)
-        if web_content:
-            self.ax.AXUIElementSetAttributeValue(application, "AXManualAccessibility", True)
-        return application
+    def attribute(self, element: object, name: str) -> object | None:
+        code, value = self.backend.copy(element, name)
+        return value if code == AX_SUCCESS else None
 
-    def windows(self, web_content: bool = False) -> list[Any]:
-        return list(self.attribute(self.application(web_content), "AXWindows") or [])
+    def attributes(self, element: object, names: Sequence[str]) -> list[object | None]:
+        code, values = self.backend.copy_many(element, names)
+        if code == AX_SUCCESS and values is not None and len(values) == len(names):
+            return list(values)
+        return [self.attribute(element, name) for name in names]
 
-    def find_window(self, matches: Callable[[str], bool], web_content: bool = False) -> Any:
-        return self._matching(matches, web_content)
+    def text(self, element: object, name: str) -> str:
+        return as_text(self.attribute(element, name))
 
-    def window(self, matches: Callable[[str], bool], web_content: bool = False) -> Any:
-        found = self._matching(matches, web_content)
-        if found is None:
-            subprocess.run(["open", "-a", self._app_name], check=False, timeout=30)
-            deadline = self.clock() + self._launch_timeout
-            while found is None and self.clock() < deadline:
-                self.sleep(POLL_SECONDS)
-                found = self._matching(matches, web_content)
-        if found is None:
-            raise OfficeError(
-                f"{self._app_name} has no matching window, and opening one did not work."
-            )
-        return found
+    def set_attribute(
+        self, element: object, name: str, value: object, tolerate: frozenset[int] = frozenset()
+    ) -> None:
+        code = self.backend.set(element, name, value)
+        if code != AX_SUCCESS and code not in tolerate:
+            raise AxActionError(f"setting {name} failed (error {code})")
 
-    def attribute(self, element: Any, name: str) -> Any:
-        error, value = self.ax.AXUIElementCopyAttributeValue(element, name, None)
-        return value if error == 0 else None
+    def perform(
+        self, element: object, action: str, label: str = "", tolerate: frozenset[int] = frozenset()
+    ) -> int:
+        code = self.backend.perform(element, action)
+        if code != AX_SUCCESS and code not in tolerate:
+            raise AxActionError(f"{action} failed on {label[:80]!r} (error {code})")
+        return code
 
-    def set_attribute(self, element: Any, name: str, value: Any) -> None:
-        error = self.ax.AXUIElementSetAttributeValue(element, name, value)
-        if error != 0:
-            raise OfficeError(f"setting {name} failed (error {error})")
+    def actions(self, element: object) -> tuple[str, ...]:
+        return self.backend.action_names(element)
 
-    def perform(self, element: Any, action: str, label: str = "") -> None:
-        error = self.ax.AXUIElementPerformAction(element, action)
-        if error != 0:
-            raise OfficeError(f"{action} failed on {label[:80]!r} (error {error})")
+    def custom_action(self, element: object, label: str) -> str | None:
+        return next(
+            (raw for raw in self.actions(element) if custom_action_label(raw) == label), None
+        )
 
     def snapshot(
-        self, element: Any, max_depth: int = MAX_DEPTH, skip: Callable[[Node], bool] | None = None
+        self,
+        element: object,
+        max_depth: int = MAX_DEPTH,
+        prune: Callable[[Node], bool] | None = None,
     ) -> Node:
-        return Snapshotter(self, max_depth, skip).build(element)
+        from office_mcp.shared.snapshot import Snapshotter
 
-    def values(self, element: Any) -> list[Any]:
-        error, values = self.ax.AXUIElementCopyMultipleAttributeValues(element, ATTRIBUTES, 0, None)
-        if error == 0 and values is not None and len(values) == len(ATTRIBUTES):
-            return list(values)
-        return [self.attribute(element, name) for name in ATTRIBUTES]
+        return Snapshotter(self, max_depth, prune).build(element)
 
-    def _matching(self, matches: Callable[[str], bool], web_content: bool) -> Any:
-        return next(
-            (
-                w
-                for w in self.windows(web_content)
-                if matches(as_text(self.attribute(w, "AXTitle")))
+    def same(self, first: object, second: object) -> bool:
+        return self.backend.same(first, second)
+
+    def text_range(self, location: int, length: int) -> object:
+        return self.backend.range_value(location, length)
+
+    def set_enhanced(self, value: bool) -> bool | None:
+        element = self.application()
+        before = self.attribute(element, ENHANCED_INTERFACE)
+        code = self.backend.set(element, ENHANCED_INTERFACE, value)
+        if code != AX_SUCCESS and code not in ENHANCED_CODES:
+            raise AccessibilityModeError(
+                f"{self.app_name} refused {ENHANCED_INTERFACE}={value} (error {code})"
+            )
+        after = self.attribute(element, ENHANCED_INTERFACE)
+        if after is None or bool(after) != value:
+            raise AccessibilityModeError(
+                f"{self.app_name} did not apply {ENHANCED_INTERFACE}={value}"
+            )
+        return None if before is None else bool(before)
+
+    def window_or_launch(
+        self, matches: Callable[[object], bool], timeout: float = LAUNCH_TIMEOUT
+    ) -> object:
+        found = self._matching_window(matches)
+        if found is not None:
+            return found
+        self.processes.launch(self.app_name)
+        return self.waiter.require(
+            lambda: self._matching_window(matches),
+            lambda: UiTimeoutError(
+                f"{self.app_name} has no matching window, and opening one did not work."
             ),
-            None,
+            timeout,
         )
 
-
-class Snapshotter:
-    def __init__(self, app: AxApp, max_depth: int, skip: Callable[[Node], bool] | None) -> None:
-        self._app = app
-        self._max_depth = max_depth
-        self._skip = skip
-        self._budget = MAX_NODES
-        self._seen: set[int] = set()
-
-    def build(self, element: Any, depth: int = 0) -> Node:
-        self._budget -= 1
-        self._seen.add(hash(element))
-        role, title, value, description, dom_id, identifier, classes, children = self._app.values(
-            element
-        )
-        node = Node(
-            role=as_text(role),
-            title=as_text(title),
-            value=as_text(value),
-            description=as_text(description),
-            dom_id=as_text(dom_id) or as_text(identifier),
-            classes=tuple(as_text(item) for item in as_sequence(classes)),
-            handle=element,
-        )
-        if depth >= self._max_depth or self._budget <= 0 or (self._skip and self._skip(node)):
-            return node
-        kids = tuple(
-            self.build(child, depth + 1)
-            for child in as_sequence(children)
-            if hash(child) not in self._seen and self._budget > 0
-        )
-        return Node(
-            role=node.role,
-            title=node.title,
-            value=node.value,
-            description=node.description,
-            dom_id=node.dom_id,
-            classes=node.classes,
-            children=kids,
-            handle=element,
-        )
+    def _matching_window(self, matches: Callable[[object], bool]) -> object | None:
+        return next((window for window in self.windows() if matches(window)), None)
 
 
-def as_text(value: Any) -> str:
+def custom_action_label(raw: str) -> str:
+    first_line = raw.split("\n", 1)[0]
+    if first_line.startswith(CUSTOM_ACTION_NAME):
+        return first_line[len(CUSTOM_ACTION_NAME) :].strip()
+    return raw
+
+
+def as_text(value: object) -> str:
     if isinstance(value, str):
         return value
     if isinstance(value, bool):
@@ -181,8 +265,28 @@ def as_text(value: Any) -> str:
     return ""
 
 
-def as_sequence(value: Any) -> Iterable[Any]:
-    if value is None or isinstance(value, str):
+def as_bool(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    return None
+
+
+def as_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
+
+def as_sequence(value: object) -> Iterable[Any]:
+    if value is None or isinstance(value, str | bytes):
+        return ()
+    if not isinstance(value, Iterable):
         return ()
     try:
         return list(value)

@@ -71,6 +71,14 @@ jobs:
         run: uv run --no-sync mypy src tests
       - name: Pytest
         run: uv run --no-sync pytest
+      - name: Server scripts
+        run: |
+          if [ -f scripts/no_comments.py ]; then
+            uv run --no-sync python -I scripts/no_comments.py src tests scripts
+          fi
+          if [ -f scripts/contract_check.py ]; then
+            uv run --no-sync python -I scripts/contract_check.py
+          fi
 
   template:
     name: Server template
@@ -122,6 +130,12 @@ jobs:
         run: |
           if git grep -nI "$(printf '\342\200\224')"; then
             echo "::error::Replace em dashes with periods, commas, parentheses or colons"
+            exit 1
+          fi
+      - name: Reject en dashes
+        run: |
+          if git grep -nI "$(printf '\342\200\223')"; then
+            echo "::error::Replace en dashes with hyphens, commas or the word to"
             exit 1
           fi
       - name: Every server ships its required files

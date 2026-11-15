@@ -2,57 +2,48 @@ from __future__ import annotations
 
 import argparse
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import replace
 
 import uvicorn
 from mcp.server.mcpserver import MCPServer
-from mcp.types import ToolAnnotations
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from office_mcp import descriptions as text
-from office_mcp.container import build_services
+from office_mcp.container import Container, build_container, exposed_specs
+from office_mcp.features.persona.render import instructions_block
 from office_mcp.shared.errors import SettingsError
 from office_mcp.shared.http import BearerTokenMiddleware, transport_security
+from office_mcp.shared.registry import ToolGroup, ToolSpec, annotations_for
 from office_mcp.shared.settings import TRANSPORTS, Settings, parse_port, parse_transport
-from office_mcp.tools import OfficeTools
 
 STREAMABLE_HTTP_PATH = "/mcp"
 
-READ_ONLY = ToolAnnotations(
-    read_only_hint=True,
-    destructive_hint=False,
-    idempotent_hint=True,
-    open_world_hint=False,
-)
-MARKS_READ = ToolAnnotations(
-    read_only_hint=False,
-    destructive_hint=False,
-    idempotent_hint=False,
-    open_world_hint=False,
-)
+
+def server_instructions(container: Container) -> str:
+    settings = container.settings
+    groups = settings.tool_policy.groups
+    block = (
+        instructions_block(container.persona, container.owner) if ToolGroup.SEND in groups else ""
+    )
+    return text.instructions(container.owner, settings.zone.name, groups, block)
 
 
-def build_tools(settings: Settings) -> OfficeTools:
-    return OfficeTools(lambda: build_services(settings.zone.info))
+def register(server: MCPServer, spec: ToolSpec) -> None:
+    server.tool(
+        name=spec.name,
+        description=spec.description,
+        annotations=annotations_for(spec.effect),
+    )(spec.function)
 
 
-def create_server(settings: Settings, tools: OfficeTools) -> MCPServer:
-    owner = text.Owner(settings.owner_name)
-    server = MCPServer("office", instructions=text.instructions(owner, settings.zone.name))
-    register: list[tuple[Callable[..., object], str, ToolAnnotations]] = [
-        (tools.office_status, text.OFFICE_STATUS, READ_ONLY),
-        (tools.outlook_folders, text.OUTLOOK_FOLDERS, READ_ONLY),
-        (tools.outlook_conversations, text.OUTLOOK_CONVERSATIONS, READ_ONLY),
-        (tools.outlook_read, text.OUTLOOK_READ, MARKS_READ),
-        (tools.teams_chats, text.TEAMS_CHATS, READ_ONLY),
-        (tools.teams_read, text.TEAMS_READ, MARKS_READ),
-        (tools.teams_needs_reply, text.teams_needs_reply(owner), READ_ONLY),
-    ]
-    for function, description, hints in register:
-        server.tool(name=function.__name__, description=description, annotations=hints)(function)
+def create_server(container: Container) -> MCPServer:
+    specs = exposed_specs(container)
+    server = MCPServer("office", instructions=server_instructions(container))
+    for spec in specs:
+        register(server, spec)
     server.custom_route("/health", methods=["GET"], include_in_schema=False)(health)
     return server
 
@@ -118,10 +109,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     try:
         settings = apply_arguments(Settings.from_env(), args)
+        server = create_server(build_container(settings))
     except SettingsError as error:
         print(f"office-mcp: {error}", file=sys.stderr)
         raise SystemExit(2) from error
-    serve(create_server(settings, build_tools(settings)), settings)
+    serve(server, settings)
 
 
 if __name__ == "__main__":

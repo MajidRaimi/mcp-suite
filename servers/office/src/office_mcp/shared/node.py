@@ -16,6 +16,11 @@ class Node:
     classes: tuple[str, ...] = ()
     children: tuple[Node, ...] = ()
     handle: object | None = field(default=None, repr=False)
+    subrole: str = ""
+    help: str = ""
+    enabled: bool | None = None
+    level: int | None = None
+    selected: bool | None = None
 
     def walk(self) -> Iterator[Node]:
         yield self
@@ -33,4 +38,4 @@ class Node:
         return " ".join(" ".join(piece.split()) for piece in pieces if piece.strip())
 
     def label(self) -> str:
-        return " ".join((self.title or self.description or self.text()).split())
+        return " ".join((self.title or self.description or self.text() or self.help).split())

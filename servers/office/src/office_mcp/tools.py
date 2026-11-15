@@ -1,89 +1,120 @@
 from __future__ import annotations
 
-import threading
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from mcp.server.mcpserver.exceptions import ToolError
-
-from office_mcp.container import Services
-from office_mcp.features.teams.replies.service import needs_reply
+from office_mcp import descriptions as text
+from office_mcp.features.outlook.driver import OutlookDriver
+from office_mcp.features.teams.driver import TeamsDriver
+from office_mcp.shared.ax import ENHANCED_INTERFACE, AxApp, as_bool
 from office_mcp.shared.errors import OfficeError
+from office_mcp.shared.focus import Workspace
+from office_mcp.shared.registry import Effect, ToolGroup, ToolPolicy, ToolSpec
+from office_mcp.shared.settings import Settings
+
+if TYPE_CHECKING:
+    from office_mcp.container import Container
 
 Record = dict[str, Any]
+ALL_EXPERIMENTAL = "all"
+
+
+def guarded[T](read: Callable[[], T]) -> T | None:
+    try:
+        return read()
+    except OfficeError:
+        return None
+
+
+def policy_record(policy: ToolPolicy) -> Record:
+    experimental = [ALL_EXPERIMENTAL] if policy.all_experimental else sorted(policy.experimental)
+    return {
+        "read_only": policy.groups <= {ToolGroup.READ},
+        "tool_groups": sorted(group.value for group in policy.groups),
+        "experimental": experimental,
+        "disabled_tools": sorted(policy.disabled),
+    }
+
+
+def settings_record(settings: Settings) -> Record:
+    allowlist = settings.send_only_to
+    return {
+        **policy_record(settings.tool_policy),
+        "send_only_to": None if allowlist is None else list(allowlist.entries()),
+        "self_chat_thread": settings.self_chat_thread,
+    }
+
+
+def session_state(workspace: Workspace) -> str:
+    if workspace.screen_locked():
+        return "locked"
+    if workspace.secure_input():
+        return "secure_input"
+    return "ok"
+
+
+def frontmost_app(workspace: Workspace) -> str | None:
+    pid = workspace.frontmost_pid()
+    return None if pid is None else workspace.app_name(pid)
+
+
+def enhanced_mode(app: AxApp) -> bool | None:
+    if not (app.trusted() and app.running()):
+        return None
+    return guarded(lambda: as_bool(app.attribute(app.application(), ENHANCED_INTERFACE)))
+
+
+def outlook_record(outlook: OutlookDriver, health: Callable[[], Record]) -> Record:
+    running = outlook.app.running()
+    record: Record = {"outlook_running": running}
+    if not (running and outlook.app.trusted()):
+        return record
+    return {
+        **record,
+        **health(),
+        "outlook_account": guarded(outlook.gateway.account),
+        "outlook_mode": guarded(lambda: outlook.gateway.mode().value),
+    }
+
+
+def apps_record(outlook: OutlookDriver, teams: TeamsDriver, health: Callable[[], Record]) -> Record:
+    workspace = outlook.workspace
+    return {
+        "accessibility": outlook.app.trusted(),
+        **outlook_record(outlook, health),
+        "teams_running": teams.app.running(),
+        "teams_enhanced_mode": enhanced_mode(teams.app),
+        "frontmost_app": guarded(lambda: frontmost_app(workspace)),
+        "session": session_state(workspace),
+    }
+
+
+def office_status(container: Container) -> Record:
+    return {
+        **apps_record(
+            container.outlook.get(),
+            container.teams.get(),
+            lambda: container.mail.get().health_record(),
+        ),
+        **settings_record(container.settings),
+        "persona": container.persona.status().to_record(),
+    }
 
 
 class OfficeTools:
-    def __init__(self, factory: Callable[[], Services]) -> None:
-        self._factory = factory
-        self._services: Services | None = None
-        self._build_lock = threading.Lock()
+    def __init__(self, container: Container) -> None:
+        self._container = container
+
+    def specs(self) -> list[ToolSpec]:
+        return [
+            ToolSpec(
+                name="office_status",
+                function=self.office_status,
+                description=text.OFFICE_STATUS,
+                group=ToolGroup.READ,
+                effect=Effect.READS,
+            )
+        ]
 
     def office_status(self) -> Record:
-        return self._guarded(lambda s: s.status())
-
-    def outlook_folders(self) -> list[Record]:
-        return self._guarded(lambda s: [folder.to_record() for folder in s.outlook.folders()])
-
-    def outlook_conversations(
-        self,
-        folder: str = "Inbox",
-        unread_only: bool = False,
-        days: int | None = None,
-        limit: int = 50,
-        load_more: int = 0,
-    ) -> list[Record]:
-        return self._guarded(
-            lambda s: [
-                summary.to_record()
-                for summary in s.outlook.conversations(folder, unread_only, days, limit, load_more)
-            ]
-        )
-
-    def outlook_read(
-        self,
-        ref: str,
-        folder: str | None = None,
-        keep_unread: bool = True,
-        max_body: int = 20000,
-    ) -> Record:
-        return self._guarded(
-            lambda s: s.outlook.read(ref, folder, keep_unread, max_body).to_record()
-        )
-
-    def teams_chats(
-        self,
-        unread_only: bool = False,
-        section: str | None = None,
-        limit: int = 0,
-    ) -> list[Record]:
-        return self._guarded(
-            lambda s: [chat.to_record() for chat in s.chats.filtered(unread_only, section, limit)]
-        )
-
-    def teams_read(self, chat: str, limit: int = 30, older: int = 0) -> Record:
-        return self._guarded(lambda s: s.messages.read(chat, limit, older).to_record())
-
-    def teams_needs_reply(self, days: int = 7, include_meetings: bool = False) -> list[Record]:
-        return self._guarded(
-            lambda s: [
-                chat.to_record()
-                for chat in needs_reply(
-                    s.chats.filtered(False, None, 0), s.today(), days, include_meetings
-                )
-            ]
-        )
-
-    def _current(self) -> Services:
-        with self._build_lock:
-            if self._services is None:
-                self._services = self._factory()
-            return self._services
-
-    def _guarded[T](self, work: Callable[[Services], T]) -> T:
-        try:
-            current = self._current()
-            with current.lock:
-                return work(current)
-        except OfficeError as error:
-            raise ToolError(str(error)) from error
+        return self._container.runner.read(lambda _deadline: office_status(self._container))

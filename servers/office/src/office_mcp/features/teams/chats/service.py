@@ -6,9 +6,11 @@ from datetime import date
 from office_mcp.features.teams.chats.models import Chat, ChatRow
 from office_mcp.features.teams.chats.parse import parse_chats
 from office_mcp.features.teams.gateway import TeamsGateway
-from office_mcp.shared.errors import OfficeError
+from office_mcp.features.teams.rail import TeamsApp
+from office_mcp.shared.errors import AmbiguousTargetError, ElementNotFoundError, TargetNotFoundError
 from office_mcp.shared.node import Node
 from office_mcp.shared.text import normalize
+from office_mcp.shared.waiting import Waiter
 
 CHAT_APP_PREFIX = "Chat ("
 CHAT_APP_ROLE = "AXCheckBox"
@@ -16,9 +18,10 @@ MAX_CANDIDATES = 8
 
 
 class ChatService:
-    def __init__(self, gateway: TeamsGateway, today: Callable[[], date]) -> None:
+    def __init__(self, gateway: TeamsGateway, today: Callable[[], date], waiter: Waiter) -> None:
         self._gateway = gateway
         self._today = today
+        self._waiter = waiter
 
     def rows(self) -> list[ChatRow]:
         root = self._gateway.snapshot()
@@ -27,9 +30,9 @@ class ChatService:
             return rows
         switch = root.find(is_chat_app_button)
         if switch is None:
-            raise OfficeError("no chat list found in the Teams window")
+            raise ElementNotFoundError("no chat list found in the Teams window")
         self._gateway.press(switch)
-        return parse_chats(self._gateway.snapshot(), self._today())
+        return self._waiter.until(self._listed) or []
 
     def filtered(self, unread_only: bool, section: str | None, limit: int) -> list[Chat]:
         chats = [row.chat for row in self.rows()]
@@ -46,15 +49,20 @@ class ChatService:
             return exact[0]
         return pick(query, rows)
 
+    def _listed(self) -> list[ChatRow] | None:
+        return parse_chats(self._gateway.snapshot(), self._today()) or None
+
 
 def is_chat_app_button(node: Node) -> bool:
+    if node.dom_id == TeamsApp.CHAT.value:
+        return True
     return node.role == CHAT_APP_ROLE and node.title.startswith(CHAT_APP_PREFIX)
 
 
 def pick(query: str, rows: list[ChatRow]) -> ChatRow:
     wanted = normalize(query)
     if not wanted:
-        raise OfficeError("empty chat name")
+        raise TargetNotFoundError("empty chat name")
     names = [(row, normalize(row.chat.name)) for row in rows]
     for matches in (
         [row for row, name in names if name == wanted],
@@ -65,6 +73,8 @@ def pick(query: str, rows: list[ChatRow]) -> ChatRow:
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
-            listed = ", ".join(row.chat.name for row in matches[:MAX_CANDIDATES])
-            raise OfficeError(f"{query!r} matches several chats: {listed}. Be more specific.")
-    raise OfficeError(f"no chat named {query!r} in the chat list")
+            listed = [row.chat.name for row in matches[:MAX_CANDIDATES]]
+            raise AmbiguousTargetError(
+                f"{query!r} matches several chats. Be more specific.", listed
+            )
+    raise TargetNotFoundError(f"no chat named {query!r} in the chat list")

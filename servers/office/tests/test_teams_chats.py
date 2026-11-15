@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import pytest
-from conftest import TODAY, FakeGateway, chat_row, section_row, window
+from conftest import TODAY
+from fakes.clock import fake_waiter
+from fakes.teams_gateway import FakeTeamsGateway
+from fakes.trees import chat_row, section_row, teams_window
 
 from office_mcp.features.teams.chats.parse import parse_chats
 from office_mcp.features.teams.chats.service import ChatService
 from office_mcp.features.teams.replies.service import needs_reply
 from office_mcp.shared.errors import OfficeError
 from office_mcp.shared.node import Node
+
+
+def chat_service(gateway: FakeTeamsGateway) -> ChatService:
+    return ChatService(gateway, lambda: TODAY, fake_waiter())
 
 
 def chat_list() -> Node:
@@ -58,7 +65,7 @@ def chat_list() -> Node:
             ],
         ),
     ]
-    return window("Chat | Bob Sample", rows, [])
+    return teams_window("Chat | Bob Sample", rows, [])
 
 
 def test_parses_rows_with_sections_kinds_and_flags() -> None:
@@ -87,7 +94,7 @@ def test_parses_rows_with_sections_kinds_and_flags() -> None:
 
 
 def test_list_filters_unread_and_section() -> None:
-    service = ChatService(FakeGateway([chat_list()]), lambda: TODAY)
+    service = chat_service(FakeTeamsGateway([chat_list()]))
 
     assert [c.name for c in service.filtered(True, None, 0)] == ["Alice Example", "Team Chat"]
     assert [c.name for c in service.filtered(False, "pinned", 0)] == ["Jane Doe (You)"]
@@ -95,7 +102,7 @@ def test_list_filters_unread_and_section() -> None:
 
 
 def test_resolve_prefers_exact_then_prefix_then_words() -> None:
-    service = ChatService(FakeGateway([chat_list()]), lambda: TODAY)
+    service = chat_service(FakeTeamsGateway([chat_list()]))
     rows = service.rows()
 
     assert service.resolve("bob", rows).chat.thread_id == "19:b"
@@ -108,7 +115,7 @@ def test_resolve_prefers_exact_then_prefix_then_words() -> None:
 
 def test_resolve_reports_ambiguous_matches() -> None:
     rows = parse_chats(
-        window(
+        teams_window(
             "Chat | x",
             [
                 chat_row("19:1", "Sam Alpha", "hi", "10/19"),
@@ -118,9 +125,9 @@ def test_resolve_reports_ambiguous_matches() -> None:
         ),
         TODAY,
     )
-    service = ChatService(FakeGateway([window("Chat | x", [], [])]), lambda: TODAY)
+    service = chat_service(FakeTeamsGateway([teams_window("Chat | x", [], [])]))
 
-    with pytest.raises(OfficeError, match="Sam Alpha, Sam Beta"):
+    with pytest.raises(OfficeError, match="Sam Alpha; Sam Beta"):
         service.resolve("sam", rows)
     assert service.resolve("alpha", rows).chat.thread_id == "19:1"
 
@@ -131,9 +138,9 @@ def test_switches_to_chat_app_when_list_is_hidden() -> None:
         title="Activity | Feed",
         children=(Node(role="AXCheckBox", title="Chat (⌘ 2)", handle="chat-app"),),
     )
-    gateway = FakeGateway([activity, chat_list()])
+    gateway = FakeTeamsGateway([activity, chat_list()])
 
-    rows = ChatService(gateway, lambda: TODAY).rows()
+    rows = chat_service(gateway).rows()
 
     assert gateway.pressed == ["chat-app"]
     assert len(rows) == 7

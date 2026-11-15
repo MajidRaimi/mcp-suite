@@ -4,8 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from office_mcp.descriptions import Owner, instructions, teams_needs_reply
+from office_mcp.descriptions import Owner, instructions
 from office_mcp.shared.errors import SettingsError
+from office_mcp.shared.registry import ToolGroup
 from office_mcp.shared.settings import Settings, local_zone
 
 
@@ -87,8 +88,8 @@ def test_invalid_values_raise_settings_error(variable: str, value: str, message:
 
 
 def test_descriptions_use_owner_and_zone() -> None:
-    assert "the user's Microsoft Outlook" in instructions(Owner(), "UTC")
-    assert "Teams are in Europe/Berlin" in instructions(Owner("Alice"), "Europe/Berlin")
-    assert "Alice's Microsoft Outlook" in instructions(Owner("Alice"), "UTC")
-    assert "not from the user" in teams_needs_reply(Owner())
-    assert "not from Alice" in teams_needs_reply(Owner("Alice"))
+    reads = frozenset({ToolGroup.READ})
+    assert "the user's Microsoft Outlook" in instructions(Owner(), "UTC", reads)
+    assert "Teams are in Europe/Berlin" in instructions(Owner("Alice"), "Europe/Berlin", reads)
+    assert "Alice's Microsoft Outlook" in instructions(Owner("Alice"), "UTC", reads)
+    assert "tell Alice exactly that" in instructions(Owner("Alice"), "UTC", reads)
