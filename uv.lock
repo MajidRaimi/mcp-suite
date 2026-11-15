@@ -586,7 +586,7 @@ wheels = [
 
 [[package]]
 name = "office-mcp"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "servers/office" }
 dependencies = [
     { name = "cryptography", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },

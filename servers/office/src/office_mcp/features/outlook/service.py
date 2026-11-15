@@ -3,13 +3,15 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from typing import Any
 
 from office_mcp.features.outlook.gateway import OutlookGateway
+from office_mcp.features.outlook.health import OutlookHealth, read_health, unknown_health_record
 from office_mcp.features.outlook.listing import has_load_more, parse_folder, parse_rows
 from office_mcp.features.outlook.models import Email, Folder, Row, Summary
 from office_mcp.features.outlook.reading import DEFAULT_MAX_BODY, parse_email
-from office_mcp.shared.errors import OfficeError
+from office_mcp.shared.errors import OfficeError, OutlookUnavailableError
 from office_mcp.shared.node import Node
 from office_mcp.shared.text import normalize
 
@@ -29,14 +31,31 @@ class OutlookService:
         timeout: float = 12.0,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
+        now: Callable[[], datetime] = datetime.now,
     ) -> None:
         self._gateway = gateway
+        self._now = now
         self._today = today
         self._timeout = timeout
         self._sleep = sleep
         self._clock = clock
 
+    def health(self, launch: bool = True) -> OutlookHealth:
+        return read_health(self._gateway.shallow_button_labels(launch), self._now())
+
+    def health_record(self) -> dict[str, Any]:
+        try:
+            return self.health(launch=False).to_record()
+        except OfficeError as error:
+            return unknown_health_record(str(error))
+
+    def ensure_working(self) -> None:
+        health = self.health()
+        if not health.working:
+            raise OutlookUnavailableError(health.message())
+
     def folders(self) -> list[Folder]:
+        self.ensure_working()
         parsed = (parse_folder(node.description) for node in self._gateway.folder_rows())
         return [folder for folder in parsed if folder]
 
@@ -48,6 +67,7 @@ class OutlookService:
         limit: int,
         load_more: int = 0,
     ) -> list[Summary]:
+        self.ensure_working()
         rows = self._rows(folder, days, load_more)
         summaries = [row.summary for row in rows]
         if unread_only:
@@ -64,6 +84,7 @@ class OutlookService:
         keep_unread: bool = True,
         max_body: int = DEFAULT_MAX_BODY,
     ) -> Email:
+        self.ensure_working()
         row = self._resolve(ref, self._rows(folder, None, 0))
         self._gateway.select(row.node)
         email = self._wait_for_email(row.summary, max_body)

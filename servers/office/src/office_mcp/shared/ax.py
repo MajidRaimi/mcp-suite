@@ -76,6 +76,9 @@ class AxApp:
     def windows(self, web_content: bool = False) -> list[Any]:
         return list(self.attribute(self.application(web_content), "AXWindows") or [])
 
+    def find_window(self, matches: Callable[[str], bool], web_content: bool = False) -> Any:
+        return self._matching(matches, web_content)
+
     def window(self, matches: Callable[[str], bool], web_content: bool = False) -> Any:
         found = self._matching(matches, web_content)
         if found is None:
