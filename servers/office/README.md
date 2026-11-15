@@ -8,13 +8,15 @@ Every tool returns data and nothing is sent, deleted or moved. The tools do driv
 
 | Tool | Parameters (defaults) | Returns | Side effects |
 |---|---|---|---|
-| `office_status` | none | Whether the Accessibility permission is granted and whether Outlook and Teams are running | None |
+| `office_status` | none | Whether the Accessibility permission is granted and whether Outlook and Teams are running. When Outlook runs, also `outlook_working`, `outlook_online`, `outlook_today` (the date Outlook believes it is) and `outlook_problems` (what is wrong and how to fix it) | None |
 | `outlook_folders` | none | Mail folders with unread counts | None |
 | `outlook_conversations` | `folder` ("Inbox"), `unread_only` (false), `days` (none), `limit` (50, 0 means all), `load_more` (0) | Conversations newest first, each with a stable `key`, flags, unread and message counts, title, time label, best-effort ISO date, meeting details and a preview | Switches Outlook to `folder`. `days` clicks "Load more conversations" until the range is covered (at most 20 rounds); `load_more` clicks it that many times |
 | `outlook_read` | `ref`, `folder` (current folder), `keep_unread` (true), `max_body` (20000) | The latest email in the conversation: subject, tags, sender, recipients by field with emails, collapsed recipient counts, sent time, notes and the body including quoted history | Selects the conversation (and switches to `folder` when given). Outlook marks it read when selected; with `keep_unread=true` an email that was unread is marked unread again, with `keep_unread=false` it stays read |
 | `teams_chats` | `unread_only` (false), `section` (none), `limit` (0, means all) | Chats from the chat list, top to bottom, with section, kind, unread and muted flags, presence, last message preview, sender and date | Switches Teams to the Chat view if another view is showing |
 | `teams_read` | `chat`, `limit` (30), `older` (0) | The chat and its latest messages with author, ownership, ISO timestamp and text | Opens the chat on screen, so Teams marks it read. This is not reverted. `older` scrolls up that many times to load older messages |
 | `teams_needs_reply` | `days` (7), `include_meetings` (false) | Chats whose last message is not from you, not muted and within `days`, unread first | Reads the chat list only, so nothing is marked read |
+
+Before doing anything, every Outlook tool checks that Outlook is working. If Outlook shows the "Outlook is offline" banner, or its calendar's "Today" is not the Mac's date (Outlook can get stuck on an old day after the Mac sleeps; only in the first ten minutes after midnight is yesterday accepted), the tool fails with an "Outlook is not working right now" error that says what is wrong and how to fix it, instead of returning out-of-date mail. The check reads only the top of the window and takes well under a second. `office_status` runs the same check but never opens or focuses Outlook. When the calendar pane is hidden, `outlook_today` is null and only the offline banner is checked.
 
 `ref` for `outlook_read` is a `key` from `outlook_conversations` (best), a row index, or words from the title. `chat` for `teams_read` is a chat name, part of one, or a thread id. Ambiguous names return an error that lists the candidates.
 
@@ -220,6 +222,8 @@ src/office_mcp/
 
 ## Troubleshooting
 
+- **"Outlook is not working right now. Outlook is offline..."**: Outlook lost its connection or its sign-in expired. Press Go Online in the yellow banner or sign in again, then retry.
+- **"Outlook is not working right now. Outlook's view is stuck on..."**: Outlook's idea of today stopped moving (common after the Mac sleeps or Outlook stays offline for days), so its Today and Yesterday groups are wrong. Quit and reopen Outlook.
 - **`accessibility: false`** in `office status`: grant Accessibility to the process that starts the server (see [Setup](#setup)) and restart it. Remove and re-add the entry if it was granted before an update.
 - **"office-mcp reads Outlook and Teams through the macOS accessibility API..."**: the server is running on a machine that is not a Mac, or pyobjc is missing. Run it on the Mac and use the SSH examples to reach it.
 - **"Microsoft Outlook has no matching window"**: the main Outlook window title contains a "•" separator. Make sure the main mail window is open, not only a message or calendar window.

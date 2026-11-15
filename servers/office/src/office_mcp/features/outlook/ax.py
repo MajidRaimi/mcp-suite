@@ -16,6 +16,16 @@ READING_PANE = "Reading Pane"
 PANE_CLIMB = 4
 SEARCH_FIELD = "Search"
 SEARCH_DEPTH = 30
+STATUS_SCAN_DEPTH = 4
+STATUS_SCAN_SKIP = frozenset({"AXTable", "AXOutline"})
+NO_MAIN_WINDOW = (
+    "The main Outlook mail window is not open, so Outlook's state could not be checked. Open "
+    "the main mail window in Outlook."
+)
+
+
+def is_main_window(title: str) -> bool:
+    return MAIN_WINDOW_MARK in title
 
 
 class AxOutlook:
@@ -30,6 +40,22 @@ class AxOutlook:
 
     def window_title(self) -> str:
         return as_text(self._app.attribute(self._main(), "AXTitle"))
+
+    def shallow_button_labels(self, launch: bool = True) -> list[str]:
+        labels: list[str] = []
+        stack: list[tuple[Any, int]] = [(self._main() if launch else self._existing_main(), 0)]
+        while stack:
+            element, depth = stack.pop()
+            role = self._role(element)
+            if role == "AXButton":
+                label = as_text(self._app.attribute(element, "AXDescription"))
+                if label:
+                    labels.append(label)
+            if depth >= STATUS_SCAN_DEPTH or role in STATUS_SCAN_SKIP:
+                continue
+            children = as_sequence(self._app.attribute(element, "AXChildren"))
+            stack.extend((child, depth + 1) for child in children)
+        return labels
 
     def folder_rows(self) -> list[Node]:
         outline = self._find(self._main(), lambda e: self._role(e) == "AXOutline")
@@ -98,7 +124,14 @@ class AxOutlook:
 
     def _main(self) -> Any:
         self._app.require_trust()
-        return self._app.window(lambda title: MAIN_WINDOW_MARK in title)
+        return self._app.window(is_main_window)
+
+    def _existing_main(self) -> Any:
+        self._app.require_trust()
+        window = self._app.find_window(is_main_window)
+        if window is None:
+            raise OfficeError(NO_MAIN_WINDOW)
+        return window
 
     def _rows(self, container: Any) -> list[Any]:
         return list(as_sequence(self._app.attribute(container, "AXRows")))

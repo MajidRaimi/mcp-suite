@@ -1,6 +1,6 @@
 [project]
 name = "office-mcp"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP server that reads the signed-in Outlook and Teams apps on a Mac through the accessibility API"
 readme = "README.md"
 license = "MIT"

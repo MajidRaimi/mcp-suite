@@ -37,16 +37,20 @@ def build_services(zone: tzinfo) -> Services:
     except ImportError as error:
         raise PlatformError(UNSUPPORTED_PLATFORM) from error
     chats = ChatService(teams_ax, date.today)
+    outlook = OutlookService(outlook_ax, date.today)
 
     def status() -> dict[str, Any]:
-        return {
+        record: dict[str, Any] = {
             "accessibility": outlook_ax.trusted(),
             "outlook_running": outlook_ax.running(),
             "teams_running": teams_ax.running(),
         }
+        if record["accessibility"] and record["outlook_running"]:
+            record.update(outlook.health_record())
+        return record
 
     return Services(
-        outlook=OutlookService(outlook_ax, date.today),
+        outlook=outlook,
         chats=chats,
         messages=MessageService(teams_ax, chats, zone),
         status=status,

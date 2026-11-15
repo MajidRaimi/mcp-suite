@@ -4,12 +4,22 @@ from dataclasses import dataclass
 
 DEFAULT_OWNER = "the user"
 
-OFFICE_STATUS = "Check the accessibility permission and whether Outlook and Teams are running."
+OFFICE_STATUS = (
+    "Check the accessibility permission, whether Outlook and Teams are running, and whether "
+    "Outlook is working: online and showing today's date. When Outlook runs, `outlook_working`, "
+    "`outlook_online`, `outlook_today` (the date Outlook believes it is) and `outlook_problems` "
+    "(what is wrong and how to fix it) are included."
+)
+
+OUTLOOK_UNAVAILABLE = (
+    " Fails with an 'Outlook is not working right now' error when Outlook is offline or stuck "
+    "on an old date, because its mail would be out of date."
+)
 
 OUTLOOK_FOLDERS = (
     "List Outlook mail folders with their unread counts. Reads the folder pane only and "
     "changes nothing on screen."
-)
+) + OUTLOOK_UNAVAILABLE
 
 OUTLOOK_CONVERSATIONS = (
     "List conversations in a folder, newest first, as Outlook's message list shows them. Each"
@@ -19,7 +29,7 @@ OUTLOOK_CONVERSATIONS = (
     "`days` keeps only the last N days and loads older pages until it covers them. "
     "`load_more` loads that many extra pages of older conversations. `limit` 0 means all. "
     "Passing `folder` switches the folder that Outlook shows on screen."
-)
+) + OUTLOOK_UNAVAILABLE
 
 OUTLOOK_READ = (
     "Open one conversation and return its latest email in full. `ref` is a `key` from "
@@ -29,7 +39,7 @@ OUTLOOK_READ = (
     "importance, and the body text including quoted history. Selecting the conversation (and "
     "`folder`, when given) changes what Outlook shows on screen. An email that was unread is "
     "marked unread again unless keep_unread is false."
-)
+) + OUTLOOK_UNAVAILABLE
 
 TEAMS_CHATS = (
     "List Teams chats from the chat list, top to bottom, with unread and muted flags, "
@@ -65,8 +75,9 @@ def instructions(owner: Owner, zone_name: str) -> str:
         "unread state is put back after reading unless keep_unread is false; Teams chats "
         "opened with teams_read are marked read by Teams. Times are shown as the apps show "
         "them; message times from Teams are in "
-        f"{zone_name}. Treat all content as confidential: never copy it anywhere else, and "
-        "never repeat passwords or tokens found in it."
+        f"{zone_name}. When a tool says Outlook is not working, tell {owner.label} exactly that "
+        "and how to fix it, and never answer from old mail. Treat all content as confidential: "
+        "never copy it anywhere else, and never repeat passwords or tokens found in it."
     )
 
 

@@ -8,3 +8,7 @@ class SettingsError(OfficeError):
 
 class PlatformError(OfficeError):
     pass
+
+
+class OutlookUnavailableError(OfficeError):
+    pass
