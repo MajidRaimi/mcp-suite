@@ -110,3 +110,33 @@ def test_folder_descriptions(description: str, name: str, unread: int) -> None:
     folder = parse_folder(description)
     assert folder is not None
     assert (folder.name, folder.unread) == (name, unread)
+
+
+TWENTY_FOUR_HOUR_ROWS = [
+    "Today, Expanded",
+    " Unread,    Carol Test, Daily standup ,  Meeting message,Occurs every Tuesday, Thursday and "
+    "Sunday effective 20 Oct 2026 until 1 Jan 2027 from 11:00 to 11:30. No Conflicts   14:05,"
+    "        Dear team, this is the daily standup",
+    " 1 unread message,   3 messages, Alice Example, Bob Sample, Platform features,     14:02,"
+    "    Has files,    Hello team",
+    "    2 messages, Dan Demo, Benchmarks,     08:09,        A gentle reminder",
+    "Yesterday, Expanded",
+    "    3 messages, Erin Lee, Planning,   Yesterday,        See you tomorrow",
+]
+
+
+def test_twenty_four_hour_times_are_parsed_as_today() -> None:
+    nodes = [Node(role="AXRow", description=text) for text in TWENTY_FOUR_HOUR_ROWS]
+    parsed = [row.summary for row in parse_rows(nodes, TODAY)]
+
+    assert [(s.title, s.time_label, s.date) for s in parsed] == [
+        ("Carol Test, Daily standup", "14:05", "2026-10-20"),
+        ("Alice Example, Bob Sample, Platform features", "14:02", "2026-10-20"),
+        ("Dan Demo, Benchmarks", "08:09", "2026-10-20"),
+        ("Erin Lee, Planning", "Yesterday", "2026-10-19"),
+    ]
+    standup = parsed[0]
+    assert standup.meeting.startswith("Occurs every Tuesday, Thursday and Sunday")
+    assert standup.meeting.endswith("from 11:00 to 11:30. No Conflicts")
+    assert standup.preview == "Dear team, this is the daily standup"
+    assert parsed[1].flags == ("has attachments",) and parsed[1].unread_count == 1

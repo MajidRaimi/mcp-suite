@@ -34,7 +34,7 @@ The server uses [pyobjc](https://pyobjc.readthedocs.io) to call the macOS Access
 - The new Outlook for Mac (bundle id `com.microsoft.Outlook`), signed in.
 - The new Microsoft Teams (bundle id `com.microsoft.teams2`), signed in.
 - English UI in both apps. The parser matches English labels such as "Load more conversations", "Mark Unread" and "Unread message".
-- Date formats: the Outlook message list must show dates as D/M/YYYY with 12-hour times (for example `18/10/2026` and `6:53 AM`). The Teams chat list shows dates as M/D or M/D/YYYY (for example `10/19`).
+- Date formats: the Outlook message list must show dates as D/M/YYYY, with 12-hour or 24-hour times (for example `18/10/2026`, `6:53 AM` or `14:02`). The Teams chat list shows dates as M/D or M/D/YYYY (for example `10/19`).
 - The Accessibility permission for the process that starts the server (see [Setup](#setup)).
 - [uv](https://docs.astral.sh/uv/) and Python 3.13 (uv installs Python for you).
 

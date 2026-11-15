@@ -14,7 +14,7 @@ LOAD_MORE = "Load more conversations"
 TIME_TOKEN = re.compile(
     r"(?:,\s{2,}|\s{3,})"
     r"(?:(?P<status>Replied|Forwarded)\s+)?"
-    r"(?P<time>\d{1,2}:\d{2} [AP]M|Yesterday|"
+    r"(?P<time>\d{1,2}:\d{2}(?: [AP]M)?|Yesterday|"
     r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*|\d{1,2}/\d{1,2}/\d{4}),"
 )
 MEETING = re.compile(r",?\s*Meeting message(?:,|$)")
@@ -40,7 +40,7 @@ KNOWN_FLAGS = {
     "expanded",
     "collapsed",
 }
-TIME = re.compile(r"^\d{1,2}:\d{2}\s*[AP]M$", re.IGNORECASE)
+TIME = re.compile(r"^\d{1,2}:\d{2}(?:\s*[AP]M)?$", re.IGNORECASE)
 DAY_MONTH_YEAR = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})$")
 WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 SPACES = re.compile(r"[\s​ ]+")
