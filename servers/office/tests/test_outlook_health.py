@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Any, cast
 
 import pytest
+from fakes.ax_backend import FakeElement, element
+from fakes.clock import fake_waiter
+from fakes.events import RecordingEvents
+from fakes.outlook_gateway import FakeOutlookGateway
+from fakes.scope import checked_factory
+from fakes.trees import app_rig, folder_row, outlook_main_window, window
 
 from office_mcp.features.outlook.ax import AxOutlook
-from office_mcp.features.outlook.health import parse_today_label, read_health
+from office_mcp.features.outlook.health import parse_today_label, read_health, require_working
+from office_mcp.features.outlook.rows import RefRegistry, RowFinder
 from office_mcp.features.outlook.service import OutlookService
 from office_mcp.shared.ax import AxApp
 from office_mcp.shared.errors import OfficeError, OutlookUnavailableError
-from office_mcp.shared.node import Node
+from office_mcp.shared.menus import PopupMenus
+from office_mcp.shared.windows import WindowLocator
 
 SYSTEM_NOW = datetime(2026, 11, 15, 13, 44)
 SYSTEM_TODAY = SYSTEM_NOW.date()
@@ -25,47 +31,21 @@ OFFLINE_AND_STALE = [
 ]
 
 
-class HealthGateway:
-    def __init__(self, labels: list[str], fail: bool = False) -> None:
-        self.labels = labels
-        self.fail = fail
-        self.listed = False
-        self.launches: list[bool] = []
-
-    def window_title(self) -> str:
-        return "Inbox • jane@example.com"
-
-    def shallow_button_labels(self, launch: bool = True) -> list[str]:
-        self.launches.append(launch)
-        if self.fail:
-            raise OfficeError("The main Outlook mail window is not open")
-        return self.labels
-
-    def folder_rows(self) -> list[Node]:
-        return [Node(role="AXRow", description="Inbox; 3 unread messages")]
-
-    def message_rows(self) -> list[Node]:
-        self.listed = True
-        return []
-
-    def select(self, node: Node) -> None:
-        raise AssertionError("must not select while Outlook is not working")
-
-    def press(self, node: Node) -> None:
-        raise AssertionError("must not press while Outlook is not working")
-
-    def reading_pane(self) -> Node | None:
-        return None
-
-    def toolbar_button(self, name: str) -> Node | None:
-        return None
-
-    def press_button(self, node: Node) -> None:
-        raise AssertionError("must not press while Outlook is not working")
+def health_gateway(labels: list[str]) -> FakeOutlookGateway:
+    return FakeOutlookGateway(
+        folders=[folder_row("Inbox; 3 unread messages")], labels=tuple(labels)
+    )
 
 
-def service(gateway: HealthGateway) -> OutlookService:
-    return OutlookService(gateway, lambda: SYSTEM_TODAY, now=lambda: SYSTEM_NOW)
+def service(gateway: FakeOutlookGateway) -> OutlookService:
+    waiter = fake_waiter()
+    rows = RowFinder(gateway, waiter, lambda: SYSTEM_TODAY, RefRegistry())
+
+    def check() -> None:
+        require_working(gateway.shallow_button_labels(), SYSTEM_NOW)
+
+    scopes, _ = checked_factory(check)
+    return OutlookService(gateway, rows, scopes, waiter, lambda: SYSTEM_TODAY, lambda: SYSTEM_NOW)
 
 
 @pytest.mark.parametrize(
@@ -154,24 +134,25 @@ def test_every_outlook_tool_refuses_to_answer_from_stale_mail(
     labels: list[str],
     call: Callable[[OutlookService], object],
 ) -> None:
-    gateway = HealthGateway(labels)
+    gateway = health_gateway(labels)
 
     with pytest.raises(OutlookUnavailableError, match="Outlook is not working right now"):
         call(service(gateway))
-    assert not gateway.listed
+    assert gateway.calls == []
     assert gateway.launches == [True]
 
 
 def test_working_outlook_lists_as_before() -> None:
-    gateway = HealthGateway(HEALTHY)
+    gateway = health_gateway(HEALTHY)
 
     assert service(gateway).conversations("Inbox", False, None, 20) == []
-    assert gateway.listed
+    assert "message_rows" in gateway.calls
     assert [folder.name for folder in service(gateway).folders()] == ["Inbox"]
 
 
 def test_status_never_launches_outlook_and_explains_failures() -> None:
-    gateway = HealthGateway([], fail=True)
+    gateway = health_gateway([])
+    gateway.fail_labels = "The main Outlook mail window is not open"
 
     record = service(gateway).health_record()
 
@@ -181,78 +162,40 @@ def test_status_never_launches_outlook_and_explains_failures() -> None:
     assert record["outlook_problems"] == ["The main Outlook mail window is not open"]
 
 
-@dataclass
-class Element:
-    role: str
-    description: str = ""
-    children: list[Element] = field(default_factory=list)
+def ax_outlook(app: AxApp) -> AxOutlook:
+    events = RecordingEvents()
+    return AxOutlook(app, WindowLocator(app), PopupMenus(app, events, fake_waiter()), events)
 
 
-@dataclass
-class FakeApp:
-    main: Element | None
-    launched: list[str] = field(default_factory=list)
-
-    def require_trust(self) -> None:
-        return None
-
-    def window(self, matches: Callable[[str], bool]) -> Element:
-        self.launched.append("window")
-        if self.main is None:
-            raise OfficeError("Microsoft Outlook has no matching window")
-        return self.main
-
-    def find_window(self, matches: Callable[[str], bool]) -> Element | None:
-        return self.main
-
-    def attribute(self, element: Any, name: str) -> Any:
-        node: Element = element
-        if name == "AXRole":
-            return node.role
-        if name == "AXDescription":
-            return node.description
-        if name == "AXChildren":
-            return node.children
-        return None
+def button(label: str) -> FakeElement:
+    return element("AXButton", AXDescription=label)
 
 
-def button(label: str) -> Element:
-    return Element(role="AXButton", description=label)
-
-
-def nest(depth: int, leaf: Element) -> Element:
+def nest(depth: int, leaf: FakeElement) -> FakeElement:
     node = leaf
     for _ in range(depth):
-        node = Element(role="AXGroup", children=[node])
+        node = element("AXGroup", node)
     return node
 
 
-def outlook_window() -> Element:
-    message_list = Element(role="AXTable", children=[button("Go Online inside the list")])
-    folders = Element(role="AXOutline", children=[button("Today, Monday, 1 January")])
-    return Element(
-        role="AXWindow",
-        children=[
-            button("Go Online"),
-            nest(2, button("Selected, Today, Wednesday, 4 November")),
-            nest(4, button("Too deep")),
-            message_list,
-            folders,
-        ],
-    )
-
-
 def test_scan_reads_shallow_buttons_and_skips_lists_and_deep_nodes() -> None:
-    app = FakeApp(outlook_window())
+    main = outlook_main_window(
+        button("Go Online"),
+        nest(2, button("Selected, Today, Wednesday, 4 November")),
+        nest(4, button("Too deep")),
+        element("AXTable", button("Go Online inside the list")),
+        element("AXOutline", button("Today, Monday, 1 January")),
+    )
+    rig = app_rig(main)
 
-    labels = AxOutlook(cast(AxApp, app)).shallow_button_labels()
+    labels = ax_outlook(rig.app).shallow_button_labels()
 
     assert sorted(labels) == ["Go Online", "Selected, Today, Wednesday, 4 November"]
 
 
 def test_scan_for_status_does_not_open_a_missing_window() -> None:
-    app = FakeApp(None)
+    rig = app_rig(window("Untitled • jane@example.com", AXSubrole="AXStandardWindow"))
 
     with pytest.raises(OfficeError, match="main Outlook mail window is not open"):
-        AxOutlook(cast(AxApp, app)).shallow_button_labels(launch=False)
-    assert app.launched == []
+        ax_outlook(rig.app).shallow_button_labels(launch=False)
+    assert rig.processes.launched == []

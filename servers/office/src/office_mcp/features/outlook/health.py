@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
+from office_mcp.shared.errors import OutlookUnavailableError
+
 GO_ONLINE = "Go Online"
 MIDNIGHT_GRACE = time(0, 10)
 TODAY_BUTTON = re.compile(
@@ -136,3 +138,10 @@ def safe_date(year: int, month: int, day: int) -> date | None:
         return date(year, month, day)
     except ValueError:
         return None
+
+
+def require_working(button_labels: Iterable[str], system_now: datetime) -> OutlookHealth:
+    health = read_health(button_labels, system_now)
+    if not health.working:
+        raise OutlookUnavailableError(health.message())
+    return health

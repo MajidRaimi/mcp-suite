@@ -7,8 +7,17 @@ from datetime import date, timedelta
 
 from office_mcp.features.outlook.models import Folder, Row, Summary
 from office_mcp.shared.node import Node
+from office_mcp.shared.text import normalize
 
-FOLDER = re.compile(r"^(?P<name>.+?)(?:;\s*(?P<unread>\d+) unread messages?)?$")
+FOLDER = re.compile(
+    r"^(?P<name>.+?)(?:;\s*(?P<count>\d+)\s+(?:(?P<kind>unread|unseen)\s+)?messages?)?$"
+)
+FAVORITES = "favorites"
+PATH_SEPARATOR = "/"
+FOLDER_TOKEN = re.compile(r"^\s*Folder:\s*(?P<folder>[^,]+),")
+PINNED_GROUP = "pinned"
+EXPANDED = "expanded"
+ATTACHMENT_FLAGS = frozenset({"has attachments", "has attachment"})
 GROUP = re.compile(r"^(?P<group>[^,]+), (?:Expanded|Collapsed)$")
 LOAD_MORE = "Load more conversations"
 TIME_TOKEN = re.compile(
@@ -18,7 +27,17 @@ TIME_TOKEN = re.compile(
     r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*|\d{1,2}/\d{1,2}/\d{4}),"
 )
 MEETING = re.compile(r",?\s*Meeting message(?:,|$)")
-HAS_FILES = "Has files,"
+STATUS_TOKENS = {
+    "has files": "has attachments",
+    "has reactions": "has reactions",
+    "flagged": "flagged",
+    "completed": "completed",
+    "marked as completed": "completed",
+}
+STATUS_TOKEN = re.compile(
+    r"^\s*(?P<status>" + "|".join(re.escape(token) for token in STATUS_TOKENS) + r")(?:,|\s{2,}|$)",
+    re.IGNORECASE,
+)
 UNREAD_COUNT = re.compile(r"^(\d+) unread messages?$")
 MESSAGE_COUNT = re.compile(r"^(\d+) messages?$")
 KNOWN_FLAGS = {
@@ -50,11 +69,67 @@ def clean(text: str) -> str:
     return SPACES.sub(" ", text).strip()
 
 
-def parse_folder(description: str) -> Folder | None:
+def parse_folder(description: str, level: int = 0) -> Folder | None:
     match = FOLDER.match(clean(description))
     if not match or not match["name"]:
         return None
-    return Folder(name=match["name"], unread=int(match["unread"] or 0))
+    count = int(match["count"]) if match["count"] else None
+    kind = match["kind"]
+    return Folder(
+        name=match["name"],
+        unread=count if kind == "unread" and count is not None else 0,
+        total=count if kind is None else None,
+        unseen=count if kind == "unseen" else None,
+        level=level,
+        path=match["name"],
+    )
+
+
+def parse_folders(nodes: list[Node]) -> list[Folder]:
+    return [folder for _, folder in folder_pairs(nodes)]
+
+
+def folder_pairs(nodes: list[Node]) -> list[tuple[Node, Folder]]:
+    pairs: list[tuple[Node, Folder]] = []
+    ancestors: list[str] = []
+    for node in nodes:
+        level = max(node.level or 0, 0)
+        folder = parse_folder(node.description, level)
+        if folder is None:
+            continue
+        ancestors = [*ancestors[:level], folder.name]
+        favorite = level > 0 and normalize(ancestors[0]) == FAVORITES
+        located = replace(folder, path=PATH_SEPARATOR.join(ancestors), favorite=favorite)
+        pairs.append((node, located))
+    return pairs
+
+
+def folder_matches(folder: Folder, wanted: str) -> bool:
+    target = normalize(wanted)
+    return normalize(folder.name) == target or normalize(folder.path) == target
+
+
+def pick_folder_row(nodes: list[Node], wanted: str) -> Node | None:
+    pairs = folder_pairs(nodes)
+    target = normalize(wanted)
+    exact = [pair for pair in pairs if folder_matches(pair[1], wanted)]
+    prefixed = [pair for pair in pairs if normalize(pair[1].name).startswith(target)]
+    for candidates in (exact, prefixed):
+        preferred = [pair for pair in candidates if not pair[1].favorite] or candidates
+        if preferred:
+            return preferred[0][0]
+    return None
+
+
+def row_flags(flags: tuple[str, ...]) -> dict[str, bool]:
+    present = set(flags)
+    return {
+        "flagged": "flagged" in present,
+        "replied": "replied" in present,
+        "forwarded": "forwarded" in present,
+        "has_attachments": bool(present & ATTACHMENT_FLAGS),
+        "pinned": "pinned" in present,
+    }
 
 
 def parse_rows(rows: list[Node], today: date) -> list[Row]:
@@ -75,13 +150,20 @@ def parse_rows(rows: list[Node], today: date) -> list[Row]:
         if children_left > 0 and parsed:
             children_left -= 1
             parent = parsed[-1]
-            thread = (*parent.summary.thread, thread_line(summary))
-            parsed[-1] = Row(summary=replace(parent.summary, thread=thread), node=parent.node)
+            parsed[-1] = Row(summary=with_child(parent.summary, summary), node=parent.node)
             continue
         if "expanded" in summary.flags:
             children_left = summary.message_count
         parsed.append(Row(summary=summary, node=node))
     return parsed
+
+
+def with_child(parent: Summary, child: Summary) -> Summary:
+    thread = (*parent.thread, thread_line(child))
+    if parent.preview or not child.preview:
+        return replace(parent, thread=thread)
+    key = fingerprint(parent.title, parent.time_label, child.preview)
+    return replace(parent, thread=thread, preview=child.preview, key=key)
 
 
 def thread_line(summary: Summary) -> str:
@@ -106,11 +188,16 @@ def parse_summary(description: str, index: int, group: str, today: date) -> Summ
     flags, unread_count, message_count, title = split_flags(head)
     if match["status"]:
         flags.append(match["status"].casefold())
-    if rest.startswith(HAS_FILES):
-        flags.append("has attachments")
-        rest = rest.removeprefix(HAS_FILES)
+    folder = ""
+    folder_match = FOLDER_TOKEN.match(rest)
+    if folder_match:
+        folder = clean(folder_match["folder"])
+        rest = rest[folder_match.end() :].strip()
+    status, rest = split_status(rest)
+    flags.extend(status)
     preview = clean(rest).rstrip(", ").strip()
     time_label = clean(match["time"])
+    booleans = row_flags(tuple(flags))
     return Summary(
         key=fingerprint(title, time_label, preview),
         index=index,
@@ -125,7 +212,21 @@ def parse_summary(description: str, index: int, group: str, today: date) -> Summ
         date=label_date(time_label, group, today),
         preview=preview,
         thread=(),
+        folder=folder,
+        flagged=booleans["flagged"],
+        replied=booleans["replied"],
+        forwarded=booleans["forwarded"],
+        has_attachments=booleans["has_attachments"],
+        pinned=booleans["pinned"] or group.casefold() == PINNED_GROUP,
     )
+
+
+def split_status(rest: str) -> tuple[list[str], str]:
+    found: list[str] = []
+    while (match := STATUS_TOKEN.match(rest)) is not None:
+        found.append(STATUS_TOKENS[clean(match["status"]).casefold()])
+        rest = rest[match.end() :].strip()
+    return found, rest
 
 
 def split_flags(head: str) -> tuple[list[str], int, int, str]:
@@ -157,8 +258,17 @@ def is_flag(part: str) -> bool:
     )
 
 
+def expanded_header_of(header: Summary, original: Summary) -> bool:
+    if EXPANDED not in header.flags or EXPANDED in original.flags:
+        return False
+    if header.time_label != original.time_label or not header.title:
+        return False
+    return original.title == header.title or original.title.endswith(f", {header.title}")
+
+
 def fingerprint(title: str, time_label: str, preview: str) -> str:
-    digest = hashlib.sha1(f"{title}\n{time_label}\n{preview[:120]}".encode()).hexdigest()
+    subject_tail = title.rsplit(", ", 1)[-1]
+    digest = hashlib.sha1(f"{subject_tail}\n{time_label}\n{preview[:120]}".encode()).hexdigest()
     return digest[:12]
 
 
